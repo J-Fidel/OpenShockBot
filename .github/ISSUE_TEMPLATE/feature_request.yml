@@ -1,0 +1,25 @@
+name: Feature request
+description: Suggest an interaction, safety, or self-hosting improvement.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: User need
+      description: What should become easier, safer, or more capable?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Consent and safety implications
+      description: Explain limits, permissions, cooldowns, and potential abuse cases.
+    validations:
+      required: true

@@ -1,0 +1,72 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+
+
+class ControlType(StrEnum):
+    SHOCK = "Shock"
+    VIBRATE = "Vibrate"
+    SOUND = "Sound"
+    STOP = "Stop"
+
+
+class ControlSource(StrEnum):
+    SLASH_COMMAND = "slash_command"
+    REACTION = "reaction"
+    BUTTON = "button"
+    CONTEXT_MENU = "context_menu"
+
+
+class AccessMode(StrEnum):
+    EVERYONE = "everyone"
+    ALLOWLIST = "allowlist"
+
+
+class AccessDecision(StrEnum):
+    ALLOW = "allow"
+    BLOCK = "block"
+
+
+@dataclass(frozen=True, slots=True)
+class Target:
+    discord_user_id: int
+    shocker_id: str
+    display_name: str | None
+    enabled: bool
+    paused: bool
+    reaction_enabled: bool
+    access_mode: AccessMode
+    max_intensity: int
+    max_duration_ms: int
+    default_intensity: int
+    default_duration_ms: int
+    cooldown_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class ControlRequest:
+    actor_id: int
+    target_id: int
+    action: ControlType
+    intensity: int
+    duration_ms: int
+    source: ControlSource
+    guild_id: int | None = None
+    message_id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedControl:
+    request: ControlRequest
+    target: Target
+    intensity: int
+    duration_ms: int
+
+
+@dataclass(frozen=True, slots=True)
+class ControlResult:
+    action: ControlType
+    intensity: int
+    duration_ms: int
+    target_name: str
