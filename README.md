@@ -75,6 +75,49 @@ openshockbot
 
 Slash commands registered globally can take a little while to appear after the bot's first start.
 
+## Run continuously on a Linux server
+
+The repository includes a hardened user-level systemd unit for the checkout location used by this
+server.
+
+```bash
+mkdir -p ~/.config/systemd/user
+ln -s ~/Documents/OpenShockBot/deploy/openshockbot.service \
+  ~/.config/systemd/user/openshockbot.service
+systemctl --user daemon-reload
+systemctl --user enable --now openshockbot
+systemctl --user status openshockbot
+```
+
+Follow live logs with:
+
+```bash
+journalctl --user -u openshockbot -f
+```
+
+If the bot must continue after the account logs out, an administrator can enable lingering once:
+
+```bash
+sudo loginctl enable-linger "$USER"
+```
+
+After changing `.env`, restart with `systemctl --user restart openshockbot`.
+
+## First applied test
+
+1. Keep the OpenShock physical emergency stop accessible and leave the shocker unworn.
+2. Start the bot and wait for its log to say that it logged into Discord.
+3. In Discord, run `/openshock status` and confirm your personal ceilings, cooldown, and access
+   mode.
+4. Run `/openshock sound` against your linked Discord user. Confirm the intended shocker beeps.
+5. Run `/openshock vibrate` at the lowest practical intensity and minimum duration while the
+   shocker is still unworn.
+6. Test `/openshock pause`, a blocked user, cooldown behavior, and `/openshock stop` before any
+   worn use.
+
+Do not begin with a shock command. Any later worn test should use explicit consent and the lowest
+personal limits that can verify operation.
+
 ## Access model
 
 Each linked Discord user owns their target configuration:

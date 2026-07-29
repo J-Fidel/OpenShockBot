@@ -83,6 +83,23 @@ async def test_service_sends_effective_values_and_audits(database: Database) -> 
     assert audit[0]["effective_intensity"] == 25
 
 
+async def test_first_control_is_allowed_during_low_system_uptime(
+    database: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("openshockbot.service.time.monotonic", lambda: 1.0)
+    fake = FakeOpenShockClient()
+    service = ControlService(
+        database,
+        PolicyEngine(database, global_max_intensity=50, global_max_duration_ms=5000),
+        fake,  # type: ignore[arg-type]
+    )
+
+    await service.execute(request())
+
+    assert len(fake.controls) == 1
+
+
 async def test_service_enforces_cooldown_but_never_blocks_stop(database: Database) -> None:
     fake = FakeOpenShockClient()
     service = ControlService(

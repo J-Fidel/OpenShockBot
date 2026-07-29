@@ -33,16 +33,16 @@ class ControlService:
             async with self._locks[request.target_id]:
                 if request.action is not ControlType.STOP:
                     key = (request.actor_id, request.target_id)
-                    remaining = (
-                        self._last_control.get(key, 0)
-                        + resolved.target.cooldown_seconds
-                        - time.monotonic()
-                    )
-                    if remaining > 0:
-                        raise CooldownError(
-                            f"Please wait {remaining:.1f} seconds before controlling "
-                            "this target again."
+                    last_control = self._last_control.get(key)
+                    if last_control is not None:
+                        remaining = (
+                            last_control + resolved.target.cooldown_seconds - time.monotonic()
                         )
+                        if remaining > 0:
+                            raise CooldownError(
+                                f"Please wait {remaining:.1f} seconds before controlling "
+                                "this target again."
+                            )
 
                 if request.action is ControlType.STOP:
                     await self._client.stop(resolved.target.shocker_id)

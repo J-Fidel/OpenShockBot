@@ -1,0 +1,23 @@
+[Unit]
+Description=OpenShockBot Discord service
+Documentation=https://github.com/J-Fidel/OpenShockBot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Documents/OpenShockBot
+EnvironmentFile=%h/Documents/OpenShockBot/.env
+ExecStart=%h/Documents/OpenShockBot/.venv/bin/openshockbot
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/Documents/OpenShockBot/data
+
+[Install]
+WantedBy=default.target
