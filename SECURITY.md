@@ -5,9 +5,10 @@
 Do not open a public issue for vulnerabilities involving credentials, authorization bypasses,
 unsafe control behavior, or private user data.
 
-Until private GitHub vulnerability reporting is configured, contact the repository owner privately.
-The owner should enable **Settings → Security → Private vulnerability reporting** immediately after
-the repository is published, then update this file with the reporting link.
+Use GitHub's private
+[vulnerability reporting form](https://github.com/J-Fidel/OpenShockBot/security/advisories/new).
+Reports submitted there are visible only to repository maintainers and invited security
+collaborators.
 
 ## Secrets
 
