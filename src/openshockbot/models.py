@@ -29,19 +29,24 @@ class AccessDecision(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class ReactionSetting:
+    enabled: bool
+    intensity: int
+    duration_ms: int
+
+
+@dataclass(frozen=True, slots=True)
 class Target:
     discord_user_id: int
     shocker_id: str
     display_name: str | None
     enabled: bool
     paused: bool
-    reaction_enabled: bool
     access_mode: AccessMode
     max_intensity: int
     max_duration_ms: int
-    default_intensity: int
-    default_duration_ms: int
     cooldown_seconds: float
+    reaction_settings: dict[ControlType, ReactionSetting]
 
 
 @dataclass(frozen=True, slots=True)

@@ -37,8 +37,15 @@ class PolicyEngine:
             raise PolicyError("That target is disabled.")
         if target.paused and request.action is not ControlType.STOP:
             raise PolicyError("That target is currently paused.")
-        if request.source is ControlSource.REACTION and not target.reaction_enabled:
-            raise PolicyError("Reaction controls are disabled for that target.")
+
+        intensity = request.intensity
+        duration_ms = request.duration_ms
+        if request.source is ControlSource.REACTION:
+            reaction = target.reaction_settings.get(request.action)
+            if reaction is None or not reaction.enabled:
+                raise PolicyError(f"{request.action.value} reactions are disabled for that target.")
+            intensity = reaction.intensity
+            duration_ms = reaction.duration_ms
 
         if request.action is ControlType.STOP:
             return ResolvedControl(
@@ -55,18 +62,18 @@ class PolicyEngine:
             if target.access_mode is AccessMode.ALLOWLIST and decision is not AccessDecision.ALLOW:
                 raise PolicyError("That target only accepts controls from allowed users.")
 
-        if not 1 <= request.intensity <= 100:
+        if not 1 <= intensity <= 100:
             raise PolicyError("Intensity must be between 1 and 100.")
-        if not 300 <= request.duration_ms <= 65_535:
+        if not 300 <= duration_ms <= 65_535:
             raise PolicyError("Duration must be between 0.3 and 65.535 seconds.")
 
         intensity = min(
-            request.intensity,
+            intensity,
             target.max_intensity,
             self._global_max_intensity,
         )
         duration_ms = min(
-            request.duration_ms,
+            duration_ms,
             target.max_duration_ms,
             self._global_max_duration_ms,
         )

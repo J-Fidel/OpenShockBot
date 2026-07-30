@@ -97,13 +97,17 @@ class OpenShockDiscordBot(commands.Bot):
             target = await self.database.get_target(message.author.id)
             if target is None:
                 return
+            reaction = target.reaction_settings.get(action)
+            if reaction is None:
+                LOGGER.warning("Missing %s reaction settings for target", action.value)
+                return
 
             request = ControlRequest(
                 actor_id=payload.user_id,
                 target_id=message.author.id,
                 action=action,
-                intensity=target.default_intensity,
-                duration_ms=target.default_duration_ms,
+                intensity=reaction.intensity,
+                duration_ms=reaction.duration_ms,
                 source=ControlSource.REACTION,
                 guild_id=payload.guild_id,
                 message_id=payload.message_id,
@@ -348,12 +352,22 @@ async def status_command(
     if config is None:
         await _respond_error(interaction, "That Discord user is not linked.")
         return
+    bot = _bot(interaction)
+    reaction_lines = []
+    for emoji, action in bot.reaction_actions.items():
+        reaction = config.reaction_settings[action]
+        state = "enabled" if reaction.enabled else "disabled"
+        reaction_lines.append(
+            f"{emoji} {action.value}: `{state}` · "
+            f"`{reaction.intensity}%/{reaction.duration_ms / 1000:g}s`"
+        )
     await interaction.response.send_message(
         "\n".join(
             [
                 f"**OpenShockBot status for {selected.mention}**",
                 f"Paused: `{config.paused}`",
-                f"Reaction controls: `{config.reaction_enabled}`",
+                "**Reaction controls**",
+                *reaction_lines,
                 f"Access mode: `{config.access_mode.value}`",
                 f"Maximum intensity: `{config.max_intensity}%`",
                 f"Maximum duration: `{config.max_duration_ms / 1000:g}s`",
@@ -366,16 +380,13 @@ async def status_command(
 
 @openshock_group.command(
     name="configure",
-    description="Set your personal safety caps, defaults, cooldown, and reaction access.",
+    description="Set your personal safety caps and shared control cooldown.",
 )
 async def configure_command(
     interaction: discord.Interaction,
     max_intensity: app_commands.Range[int, 1, 100],
     max_duration: app_commands.Range[float, 0.3, 65.535],
-    default_intensity: app_commands.Range[int, 1, 100],
-    default_duration: app_commands.Range[float, 0.3, 65.535],
     cooldown: app_commands.Range[float, 0, 3600],
-    reactions: bool,
 ) -> None:
     bot = _bot(interaction)
     target = await bot.database.get_target(interaction.user.id)
@@ -384,7 +395,6 @@ async def configure_command(
         return
 
     max_duration_ms = round(max_duration * 1000)
-    default_duration_ms = round(default_duration * 1000)
     if max_intensity > bot.settings.global_max_intensity:
         await _respond_error(
             interaction,
@@ -397,24 +407,76 @@ async def configure_command(
             "The requested maximum duration exceeds the bot-wide ceiling.",
         )
         return
-    if default_intensity > max_intensity or default_duration_ms > max_duration_ms:
-        await _respond_error(
-            interaction,
-            "Defaults cannot be higher than your personal maximums.",
-        )
-        return
-
     await bot.database.configure_target(
         interaction.user.id,
         max_intensity=max_intensity,
         max_duration_ms=max_duration_ms,
-        default_intensity=default_intensity,
-        default_duration_ms=default_duration_ms,
         cooldown_seconds=cooldown,
-        reaction_enabled=reactions,
     )
     await interaction.response.send_message(
         "Your OpenShockBot safety settings were updated.",
+        ephemeral=True,
+    )
+
+
+@openshock_group.command(
+    name="reaction-config",
+    description="Configure one reaction type's toggle and default strength.",
+)
+@app_commands.choices(
+    action=[
+        app_commands.Choice(name="Shock", value=ControlType.SHOCK.value),
+        app_commands.Choice(name="Vibrate", value=ControlType.VIBRATE.value),
+        app_commands.Choice(name="Sound", value=ControlType.SOUND.value),
+    ]
+)
+@app_commands.describe(
+    action="The reaction type to configure.",
+    enabled="Whether this emoji can trigger its action.",
+    intensity="Default intensity for this reaction type.",
+    duration="Default duration in seconds for this reaction type.",
+)
+async def reaction_config_command(
+    interaction: discord.Interaction,
+    action: app_commands.Choice[str],
+    enabled: bool,
+    intensity: app_commands.Range[int, 1, 100],
+    duration: app_commands.Range[float, 0.3, 65.535],
+) -> None:
+    bot = _bot(interaction)
+    target = await bot.database.get_target(interaction.user.id)
+    if target is None:
+        await _respond_error(interaction, "You are not linked to an OpenShock shocker.")
+        return
+
+    duration_ms = round(duration * 1000)
+    effective_max_intensity = min(target.max_intensity, bot.settings.global_max_intensity)
+    effective_max_duration_ms = min(
+        target.max_duration_ms,
+        bot.settings.global_max_duration_ms,
+    )
+    if intensity > effective_max_intensity or duration_ms > effective_max_duration_ms:
+        await _respond_error(
+            interaction,
+            "Reaction defaults cannot exceed the effective safety ceilings.",
+        )
+        return
+
+    control_type = ControlType(action.value)
+    updated = await bot.database.configure_reaction(
+        interaction.user.id,
+        control_type,
+        enabled=enabled,
+        intensity=intensity,
+        duration_ms=duration_ms,
+    )
+    if not updated:
+        await _respond_error(interaction, "That reaction setting could not be updated.")
+        return
+    state = "enabled" if enabled else "disabled"
+    await interaction.response.send_message(
+        f"{control_type.value} reactions are now {state} at "
+        f"{intensity}% for {duration_ms / 1000:g}s.",
         ephemeral=True,
     )
 

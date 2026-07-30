@@ -14,6 +14,7 @@ Priorities may move as real-world testing exposes safety, consent, or Discord us
 - [x] SQLite audit history
 - [x] Reaction triggers using wearer-controlled defaults
 - [x] Self-service defaults and safety configuration
+- [x] Per-reaction enable toggles, intensity, and duration
 
 ## Phase 2 — Reaction experience
 
