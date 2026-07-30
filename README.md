@@ -16,6 +16,7 @@ not affiliated with or endorsed by OpenShock.
   ⚡ shock, 🌊 vibrate, 🔊 sound
 - Per-target pause state
 - Personal block and allow rules
+- Central-account onboarding for multiple consenting Discord targets
 - Open-to-everyone and allow-list access modes
 - Per-actor/per-target cooldowns
 - Bot-wide and per-target intensity/duration ceilings
@@ -51,11 +52,35 @@ OpenShockBot does not need Discord's privileged Message Content intent.
 
 ## Set up OpenShock
 
-1. In the OpenShock web app, create an API token under **Settings → API Tokens**.
-2. Copy it into `OPENSHOCK_TOKEN` in `.env`.
-3. Copy the UUID of the shocker you want to control.
-4. Either set `DEFAULT_TARGET_DISCORD_ID` and `DEFAULT_SHOCKER_ID` in `.env`, or run the private
-   `/openshock link` command after the bot starts.
+1. Create a dedicated central OpenShock account for the bot operator.
+2. In the OpenShock web app, create an API token under **Settings → API Tokens**.
+3. Copy it into `OPENSHOCK_TOKEN` in `.env`.
+4. For the first target, either set `DEFAULT_TARGET_DISCORD_ID` and `DEFAULT_SHOCKER_ID` in `.env`,
+   or use the consent-based linking flow after the bot starts.
+
+Do not collect users' OpenShock API tokens in Discord. Instead, each additional target creates an
+OpenShock share code for the central account. The operator redeems it in the OpenShock web app, then
+runs:
+
+```text
+/openshock links
+/openshock link target:@member shocker_id:<choose an owned or shared shocker>
+```
+
+The target receives a DM and must run `/openshock accept-link`. They may decline with
+`/openshock decline-link`, and either the target or a bot owner can later use `/openshock unlink`.
+New consented links begin paused and allow-list-only, with shock reactions disabled. The target
+reviews `/openshock status`, configures their access rules, and explicitly resumes when ready.
+Reactions on a linked member's Discord messages resolve through that message author, so each
+member's reaction controls reach only their own assigned shocker.
+
+OpenShock owners retain their server-side share limits, pause control, and ability to revoke the
+share. OpenShockBot also revalidates central-account access before activating a pending link.
+
+For a simple single-user setup:
+
+1. Copy the first shocker's UUID.
+2. Set `DEFAULT_TARGET_DISCORD_ID` and `DEFAULT_SHOCKER_ID` in `.env`.
 
 Do not commit the API token. OpenShock requires applications to send a meaningful `User-Agent`;
 the default is set in `.env.example`.

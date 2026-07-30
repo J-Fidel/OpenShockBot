@@ -9,9 +9,15 @@ from .models import (
     AccessMode,
     ControlRequest,
     ControlType,
+    PendingLink,
     ReactionSetting,
     Target,
+    TargetAssignment,
 )
+
+
+class LinkConflictError(ValueError):
+    pass
 
 
 class Database:
@@ -64,6 +70,14 @@ class Database:
                 CHECK (action IN ('Shock', 'Vibrate', 'Sound')),
                 CHECK (intensity BETWEEN 1 AND 100),
                 CHECK (duration_ms BETWEEN 300 AND 65535)
+            );
+
+            CREATE TABLE IF NOT EXISTS pending_links (
+                target_discord_user_id TEXT PRIMARY KEY,
+                shocker_id TEXT NOT NULL UNIQUE,
+                shocker_name TEXT NOT NULL,
+                requested_by_discord_user_id TEXT NOT NULL,
+                requested_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS audit_log (
@@ -200,6 +214,170 @@ class Database:
             cooldown_seconds=float(row["cooldown_seconds"]),
             reaction_settings=reaction_settings,
         )
+
+    async def stage_link(
+        self,
+        target_discord_user_id: int,
+        shocker_id: str,
+        shocker_name: str,
+        requested_by_discord_user_id: int,
+    ) -> None:
+        if self.connection.execute(
+            "SELECT 1 FROM targets WHERE discord_user_id = ?",
+            (str(target_discord_user_id),),
+        ).fetchone():
+            raise LinkConflictError("That Discord user is already linked.")
+        assigned = self.connection.execute(
+            "SELECT discord_user_id FROM targets WHERE shocker_id = ?",
+            (shocker_id,),
+        ).fetchone()
+        if assigned:
+            raise LinkConflictError("That shocker is already assigned to a Discord user.")
+        if self.connection.execute(
+            "SELECT 1 FROM pending_links WHERE target_discord_user_id = ?",
+            (str(target_discord_user_id),),
+        ).fetchone():
+            raise LinkConflictError("That Discord user already has a pending link request.")
+        if self.connection.execute(
+            "SELECT 1 FROM pending_links WHERE shocker_id = ?",
+            (shocker_id,),
+        ).fetchone():
+            raise LinkConflictError("That shocker already has a pending link request.")
+        self.connection.execute(
+            """
+            INSERT INTO pending_links (
+                target_discord_user_id, shocker_id, shocker_name,
+                requested_by_discord_user_id, requested_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                str(target_discord_user_id),
+                shocker_id,
+                shocker_name,
+                str(requested_by_discord_user_id),
+                datetime.now(UTC).isoformat(),
+            ),
+        )
+        self.connection.commit()
+
+    async def get_pending_link(self, target_discord_user_id: int) -> PendingLink | None:
+        cursor = self.connection.execute(
+            "SELECT * FROM pending_links WHERE target_discord_user_id = ?",
+            (str(target_discord_user_id),),
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        if row is None:
+            return None
+        return PendingLink(
+            target_discord_user_id=int(row["target_discord_user_id"]),
+            shocker_id=str(row["shocker_id"]),
+            shocker_name=str(row["shocker_name"]),
+            requested_by_discord_user_id=int(row["requested_by_discord_user_id"]),
+            requested_at=str(row["requested_at"]),
+        )
+
+    async def accept_pending_link(
+        self,
+        target_discord_user_id: int,
+        *,
+        display_name: str | None,
+        max_intensity: int,
+        max_duration_ms: int,
+        cooldown_seconds: float,
+    ) -> PendingLink:
+        pending = await self.get_pending_link(target_discord_user_id)
+        if pending is None:
+            raise LinkConflictError("You do not have a pending link request.")
+        if self.connection.execute(
+            "SELECT 1 FROM targets WHERE discord_user_id = ?",
+            (str(target_discord_user_id),),
+        ).fetchone():
+            raise LinkConflictError("That Discord user is already linked.")
+        if self.connection.execute(
+            "SELECT 1 FROM targets WHERE shocker_id = ?",
+            (pending.shocker_id,),
+        ).fetchone():
+            raise LinkConflictError("That shocker is already assigned to a Discord user.")
+
+        try:
+            self.connection.execute(
+                """
+                INSERT INTO targets (
+                    discord_user_id, shocker_id, display_name, paused, access_mode,
+                    max_intensity, max_duration_ms, cooldown_seconds
+                ) VALUES (?, ?, ?, 1, ?, ?, ?, ?)
+                """,
+                (
+                    str(target_discord_user_id),
+                    pending.shocker_id,
+                    display_name,
+                    AccessMode.ALLOWLIST.value,
+                    max_intensity,
+                    max_duration_ms,
+                    cooldown_seconds,
+                ),
+            )
+            self._seed_reaction_settings(target_discord_user_id)
+            self.connection.execute(
+                "DELETE FROM pending_links WHERE target_discord_user_id = ?",
+                (str(target_discord_user_id),),
+            )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+        return pending
+
+    async def decline_pending_link(self, target_discord_user_id: int) -> bool:
+        cursor = self.connection.execute(
+            "DELETE FROM pending_links WHERE target_discord_user_id = ?",
+            (str(target_discord_user_id),),
+        )
+        self.connection.commit()
+        return cursor.rowcount > 0
+
+    async def remove_assignment(self, target_discord_user_id: int) -> tuple[bool, bool]:
+        target_cursor = self.connection.execute(
+            "DELETE FROM targets WHERE discord_user_id = ?",
+            (str(target_discord_user_id),),
+        )
+        pending_cursor = self.connection.execute(
+            "DELETE FROM pending_links WHERE target_discord_user_id = ?",
+            (str(target_discord_user_id),),
+        )
+        self.connection.commit()
+        return target_cursor.rowcount > 0, pending_cursor.rowcount > 0
+
+    async def list_assignments(self) -> list[TargetAssignment]:
+        cursor = self.connection.execute(
+            "SELECT discord_user_id, shocker_id, display_name FROM targets ORDER BY display_name"
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        return [
+            TargetAssignment(
+                discord_user_id=int(row["discord_user_id"]),
+                shocker_id=str(row["shocker_id"]),
+                display_name=row["display_name"],
+            )
+            for row in rows
+        ]
+
+    async def list_pending_links(self) -> list[PendingLink]:
+        cursor = self.connection.execute("SELECT * FROM pending_links ORDER BY requested_at")
+        rows = cursor.fetchall()
+        cursor.close()
+        return [
+            PendingLink(
+                target_discord_user_id=int(row["target_discord_user_id"]),
+                shocker_id=str(row["shocker_id"]),
+                shocker_name=str(row["shocker_name"]),
+                requested_by_discord_user_id=int(row["requested_by_discord_user_id"]),
+                requested_at=str(row["requested_at"]),
+            )
+            for row in rows
+        ]
 
     async def set_paused(self, discord_user_id: int, paused: bool) -> bool:
         cursor = self.connection.execute(

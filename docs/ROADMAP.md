@@ -15,6 +15,7 @@ Priorities may move as real-world testing exposes safety, consent, or Discord us
 - [x] Reaction triggers using wearer-controlled defaults
 - [x] Self-service defaults and safety configuration
 - [x] Per-reaction enable toggles, intensity, and duration
+- [x] Central-account shared-shocker onboarding with target consent
 
 ## Phase 2 — Reaction experience
 
