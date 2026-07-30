@@ -12,13 +12,14 @@ not affiliated with or endorsed by OpenShock.
 ## Current features
 
 - `/openshock shock`, `vibrate`, `sound`, and safety-oriented `stop` commands
-- Reaction controls on messages from linked targets: ⚡ shock, 🌊 vibrate, 🔊 sound
+- Independently configurable reaction controls on messages from linked targets:
+  ⚡ shock, 🌊 vibrate, 🔊 sound
 - Per-target pause state
 - Personal block and allow rules
 - Open-to-everyone and allow-list access modes
 - Per-actor/per-target cooldowns
 - Bot-wide and per-target intensity/duration ceilings
-- Self-service safety limits, defaults, reaction toggle, and cooldown configuration
+- Self-service safety limits, per-reaction toggles/defaults, and cooldown configuration
 - SQLite audit log of sent, denied, and failed controls
 - Private recent-activity history
 - Async OpenShock API access
@@ -128,8 +129,20 @@ Each linked Discord user owns their target configuration:
 - A `stop` request is always accepted by the bot for a linked target, including while paused.
 - Effective intensity and duration are the lowest applicable bot-wide and target-specific limits.
 
-Reaction controls use the target's stored default intensity and duration. A reaction only triggers
-when it is newly added; Discord does not generate another add event while the same reaction remains.
+Reaction controls use the target's stored per-action intensity and duration. A reaction only
+triggers when it is newly added; Discord does not generate another add event while the same
+reaction remains.
+
+Each reaction type has an independent toggle, intensity, and duration. Configure one with:
+
+```text
+/openshock reaction-config action:Shock enabled:False intensity:1 duration:0.3
+```
+
+New and migrated targets have shock reactions disabled at 1% for 0.3 seconds until the target
+explicitly enables them. Sound and vibrate inherit the previous reaction defaults during migration.
+The shared cooldown, access rules, pause state, and personal and bot-wide safety ceilings apply to
+every reaction type.
 
 ## Development
 

@@ -30,14 +30,19 @@ async def database(tmp_path: Path) -> Database:
     await database.close()
 
 
-def request(*, actor: int = 200, action: ControlType = ControlType.SHOCK) -> ControlRequest:
+def request(
+    *,
+    actor: int = 200,
+    action: ControlType = ControlType.SHOCK,
+    source: ControlSource = ControlSource.SLASH_COMMAND,
+) -> ControlRequest:
     return ControlRequest(
         actor_id=actor,
         target_id=100,
         action=action,
         intensity=90,
         duration_ms=10_000,
-        source=ControlSource.SLASH_COMMAND,
+        source=source,
     )
 
 
@@ -94,3 +99,34 @@ async def test_stop_bypasses_pause_and_access_block(database: Database) -> None:
 
     assert resolved.intensity == 0
     assert resolved.duration_ms == 300
+
+
+async def test_disabled_reaction_is_denied(database: Database) -> None:
+    policy = PolicyEngine(
+        database,
+        global_max_intensity=50,
+        global_max_duration_ms=5000,
+    )
+
+    with pytest.raises(PolicyError, match="Shock reactions are disabled"):
+        await policy.evaluate(request(source=ControlSource.REACTION))
+
+
+async def test_reaction_uses_its_own_configured_values(database: Database) -> None:
+    policy = PolicyEngine(
+        database,
+        global_max_intensity=50,
+        global_max_duration_ms=5000,
+    )
+    await database.configure_reaction(
+        100,
+        ControlType.SHOCK,
+        enabled=True,
+        intensity=7,
+        duration_ms=600,
+    )
+
+    resolved = await policy.evaluate(request(source=ControlSource.REACTION))
+
+    assert resolved.intensity == 7
+    assert resolved.duration_ms == 600

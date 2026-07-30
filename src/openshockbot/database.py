@@ -4,7 +4,14 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .models import AccessDecision, AccessMode, ControlRequest, Target
+from .models import (
+    AccessDecision,
+    AccessMode,
+    ControlRequest,
+    ControlType,
+    ReactionSetting,
+    Target,
+)
 
 
 class Database:
@@ -45,6 +52,20 @@ class Database:
                     REFERENCES targets(discord_user_id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS reaction_settings (
+                target_discord_user_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                enabled INTEGER NOT NULL,
+                intensity INTEGER NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                PRIMARY KEY (target_discord_user_id, action),
+                FOREIGN KEY (target_discord_user_id)
+                    REFERENCES targets(discord_user_id) ON DELETE CASCADE,
+                CHECK (action IN ('Shock', 'Vibrate', 'Sound')),
+                CHECK (intensity BETWEEN 1 AND 100),
+                CHECK (duration_ms BETWEEN 300 AND 65535)
+            );
+
             CREATE TABLE IF NOT EXISTS audit_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 occurred_at TEXT NOT NULL,
@@ -63,6 +84,7 @@ class Database:
             );
             """
         )
+        self._seed_reaction_settings()
         self._connection.commit()
 
     @property
@@ -109,7 +131,36 @@ class Database:
                 cooldown_seconds,
             ),
         )
+        self._seed_reaction_settings(discord_user_id)
         self.connection.commit()
+
+    def _seed_reaction_settings(self, discord_user_id: int | None = None) -> None:
+        where = "WHERE discord_user_id = ?" if discord_user_id is not None else ""
+        parameters = (str(discord_user_id),) if discord_user_id is not None else ()
+        for action in (ControlType.VIBRATE, ControlType.SOUND):
+            self.connection.execute(
+                f"""
+                INSERT OR IGNORE INTO reaction_settings (
+                    target_discord_user_id, action, enabled, intensity, duration_ms
+                )
+                SELECT discord_user_id, ?, reaction_enabled, default_intensity,
+                       default_duration_ms
+                FROM targets
+                {where}
+                """,
+                (action.value, *parameters),
+            )
+        self.connection.execute(
+            f"""
+            INSERT OR IGNORE INTO reaction_settings (
+                target_discord_user_id, action, enabled, intensity, duration_ms
+            )
+            SELECT discord_user_id, ?, 0, 1, 300
+            FROM targets
+            {where}
+            """,
+            (ControlType.SHOCK.value, *parameters),
+        )
 
     async def get_target(self, discord_user_id: int) -> Target | None:
         cursor = self.connection.execute(
@@ -120,19 +171,34 @@ class Database:
         cursor.close()
         if row is None:
             return None
+        reaction_cursor = self.connection.execute(
+            """
+            SELECT action, enabled, intensity, duration_ms
+            FROM reaction_settings
+            WHERE target_discord_user_id = ?
+            """,
+            (str(discord_user_id),),
+        )
+        reaction_settings = {
+            ControlType(reaction_row["action"]): ReactionSetting(
+                enabled=bool(reaction_row["enabled"]),
+                intensity=int(reaction_row["intensity"]),
+                duration_ms=int(reaction_row["duration_ms"]),
+            )
+            for reaction_row in reaction_cursor.fetchall()
+        }
+        reaction_cursor.close()
         return Target(
             discord_user_id=int(row["discord_user_id"]),
             shocker_id=str(row["shocker_id"]),
             display_name=row["display_name"],
             enabled=bool(row["enabled"]),
             paused=bool(row["paused"]),
-            reaction_enabled=bool(row["reaction_enabled"]),
             access_mode=AccessMode(row["access_mode"]),
             max_intensity=int(row["max_intensity"]),
             max_duration_ms=int(row["max_duration_ms"]),
-            default_intensity=int(row["default_intensity"]),
-            default_duration_ms=int(row["default_duration_ms"]),
             cooldown_seconds=float(row["cooldown_seconds"]),
+            reaction_settings=reaction_settings,
         )
 
     async def set_paused(self, discord_user_id: int, paused: bool) -> bool:
@@ -157,30 +223,60 @@ class Database:
         *,
         max_intensity: int,
         max_duration_ms: int,
-        default_intensity: int,
-        default_duration_ms: int,
         cooldown_seconds: float,
-        reaction_enabled: bool,
     ) -> bool:
         cursor = self.connection.execute(
             """
             UPDATE targets SET
                 max_intensity = ?,
                 max_duration_ms = ?,
-                default_intensity = ?,
-                default_duration_ms = ?,
-                cooldown_seconds = ?,
-                reaction_enabled = ?
+                cooldown_seconds = ?
             WHERE discord_user_id = ?
             """,
             (
                 max_intensity,
                 max_duration_ms,
-                default_intensity,
-                default_duration_ms,
                 cooldown_seconds,
-                int(reaction_enabled),
                 str(discord_user_id),
+            ),
+        )
+        self.connection.execute(
+            """
+            UPDATE reaction_settings SET
+                intensity = MIN(intensity, ?),
+                duration_ms = MIN(duration_ms, ?)
+            WHERE target_discord_user_id = ?
+            """,
+            (max_intensity, max_duration_ms, str(discord_user_id)),
+        )
+        self.connection.commit()
+        return cursor.rowcount > 0
+
+    async def configure_reaction(
+        self,
+        discord_user_id: int,
+        action: ControlType,
+        *,
+        enabled: bool,
+        intensity: int,
+        duration_ms: int,
+    ) -> bool:
+        if action is ControlType.STOP:
+            raise ValueError("Stop cannot be configured as a reaction")
+        cursor = self.connection.execute(
+            """
+            UPDATE reaction_settings SET
+                enabled = ?,
+                intensity = ?,
+                duration_ms = ?
+            WHERE target_discord_user_id = ? AND action = ?
+            """,
+            (
+                int(enabled),
+                intensity,
+                duration_ms,
+                str(discord_user_id),
+                action.value,
             ),
         )
         self.connection.commit()
