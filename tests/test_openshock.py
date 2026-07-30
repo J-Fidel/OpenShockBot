@@ -9,10 +9,16 @@ from openshockbot.openshock import OpenShockClient, OpenShockError
 
 
 class FakeResponse:
-    def __init__(self, status: int, body: str = "") -> None:
+    def __init__(
+        self,
+        status: int,
+        body: str = "",
+        json_body: object | None = None,
+    ) -> None:
         self.status = status
         self.reason = "fake"
         self._body = body
+        self._json_body = json_body
 
     async def __aenter__(self) -> FakeResponse:
         return self
@@ -22,6 +28,10 @@ class FakeResponse:
 
     async def text(self) -> str:
         return self._body
+
+    async def json(self, *, content_type: None = None) -> object:
+        del content_type
+        return self._json_body
 
 
 class FakeSession:
@@ -42,6 +52,22 @@ class FakeSession:
         self.headers = headers
         self.payload = json
         return self.response
+
+
+class FakeGetSession:
+    def __init__(self, responses: list[FakeResponse]) -> None:
+        self.responses = responses
+        self.urls: list[str] = []
+
+    def get(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+    ) -> FakeResponse:
+        del headers
+        self.urls.append(url)
+        return self.responses.pop(0)
 
 
 async def test_control_sends_v2_payload() -> None:
@@ -72,3 +98,58 @@ async def test_control_surfaces_api_error() -> None:
 
     with pytest.raises(OpenShockError, match="HTTP 403"):
         await client.stop("shocker-id")
+
+
+async def test_list_accessible_shockers_combines_owned_and_shared() -> None:
+    session = FakeGetSession(
+        [
+            FakeResponse(
+                200,
+                json_body={
+                    "data": [
+                        {
+                            "shockers": [
+                                {
+                                    "id": "00000000-0000-0000-0000-000000000001",
+                                    "name": "Owned",
+                                    "isPaused": False,
+                                }
+                            ]
+                        }
+                    ]
+                },
+            ),
+            FakeResponse(
+                200,
+                json_body={
+                    "data": [
+                        {
+                            "devices": [
+                                {
+                                    "shockers": [
+                                        {
+                                            "id": "00000000-0000-0000-0000-000000000002",
+                                            "name": "Shared",
+                                            "isPaused": True,
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                },
+            ),
+        ]
+    )
+    client = OpenShockClient("token", session=session)  # type: ignore[arg-type]
+
+    shockers = await client.list_accessible_shockers()
+
+    assert [shocker.name for shocker in shockers] == ["Owned", "Shared"]
+    assert shockers[0].source == "owned"
+    assert shockers[1].source == "shared"
+    assert shockers[1].paused is True
+    assert session.urls == [
+        "https://api.openshock.app/1/shockers/own",
+        "https://api.openshock.app/1/shockers/shared",
+    ]

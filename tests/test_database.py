@@ -3,8 +3,10 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from openshockbot.database import Database
-from openshockbot.models import ControlType
+import pytest
+
+from openshockbot.database import Database, LinkConflictError
+from openshockbot.models import AccessMode, ControlType
 
 
 async def test_new_target_gets_safe_per_reaction_defaults(tmp_path: Path) -> None:
@@ -115,4 +117,49 @@ async def test_connect_migrates_legacy_reaction_defaults_safely(tmp_path: Path) 
     assert target.reaction_settings[ControlType.SHOCK].enabled is False
     assert target.reaction_settings[ControlType.SHOCK].intensity == 1
     assert target.reaction_settings[ControlType.SHOCK].duration_ms == 300
+    await database.close()
+
+
+async def test_pending_link_requires_acceptance_and_uses_safe_defaults(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite")
+    await database.connect()
+    shocker_id = "00000000-0000-0000-0000-000000000001"
+    await database.stage_link(100, shocker_id, "Shared shocker", 900)
+
+    assert await database.get_target(100) is None
+    pending = await database.get_pending_link(100)
+    assert pending is not None
+    assert pending.shocker_name == "Shared shocker"
+
+    await database.accept_pending_link(
+        100,
+        display_name="Target",
+        max_intensity=25,
+        max_duration_ms=3000,
+        cooldown_seconds=5,
+    )
+    target = await database.get_target(100)
+
+    assert target is not None
+    assert target.paused is True
+    assert target.access_mode is AccessMode.ALLOWLIST
+    assert target.reaction_settings[ControlType.SHOCK].enabled is False
+    assert await database.get_pending_link(100) is None
+    await database.close()
+
+
+async def test_assignment_conflicts_and_removal(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite")
+    await database.connect()
+    shocker_id = "00000000-0000-0000-0000-000000000001"
+    await database.stage_link(100, shocker_id, "Shared shocker", 900)
+
+    with pytest.raises(LinkConflictError, match="pending link request"):
+        await database.stage_link(200, shocker_id, "Shared shocker", 900)
+
+    removed_target, removed_pending = await database.remove_assignment(100)
+
+    assert removed_target is False
+    assert removed_pending is True
+    assert await database.get_pending_link(100) is None
     await database.close()

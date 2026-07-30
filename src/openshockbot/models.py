@@ -36,6 +36,30 @@ class ReactionSetting:
 
 
 @dataclass(frozen=True, slots=True)
+class AccessibleShocker:
+    shocker_id: str
+    name: str
+    source: str
+    paused: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PendingLink:
+    target_discord_user_id: int
+    shocker_id: str
+    shocker_name: str
+    requested_by_discord_user_id: int
+    requested_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class TargetAssignment:
+    discord_user_id: int
+    shocker_id: str
+    display_name: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class Target:
     discord_user_id: int
     shocker_id: str

@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import logging
+import time
+from uuid import UUID
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from .config import Settings
-from .database import Database
+from .database import Database, LinkConflictError
 from .models import (
     AccessDecision,
+    AccessibleShocker,
     AccessMode,
     ControlRequest,
     ControlSource,
@@ -53,6 +56,19 @@ class OpenShockDiscordBot(commands.Bot):
             settings.reaction_vibrate_emoji: ControlType.VIBRATE,
             settings.reaction_sound_emoji: ControlType.SOUND,
         }
+        self._accessible_shocker_cache: tuple[float, list[AccessibleShocker]] | None = None
+
+    async def accessible_shockers(self, *, refresh: bool = False) -> list[AccessibleShocker]:
+        now = time.monotonic()
+        if (
+            not refresh
+            and self._accessible_shocker_cache is not None
+            and now - self._accessible_shocker_cache[0] < 30
+        ):
+            return self._accessible_shocker_cache[1]
+        shockers = await self.openshock.list_accessible_shockers()
+        self._accessible_shocker_cache = (now, shockers)
+        return shockers
 
     async def setup_hook(self) -> None:
         await self.database.connect()
@@ -506,7 +522,10 @@ async def history_command(interaction: discord.Interaction) -> None:
 
 
 @openshock_group.command(name="link", description="Link a Discord member to a shocker UUID.")
-@app_commands.describe(shocker_id="The shocker's OpenShock UUID; this response is private.")
+@app_commands.describe(
+    target="The Discord member who must accept this assignment.",
+    shocker_id="An owned or shared shocker accessible to the central bot account.",
+)
 async def link_command(
     interaction: discord.Interaction,
     target: discord.Member,
@@ -516,18 +535,238 @@ async def link_command(
     if not await bot.is_owner(interaction.user):
         await _respond_error(interaction, "Only a configured bot owner can link shockers.")
         return
-    await bot.database.upsert_target(
-        target.id,
-        shocker_id.strip(),
-        display_name=target.display_name,
-        max_intensity=min(25, bot.settings.global_max_intensity),
-        max_duration_ms=min(3000, bot.settings.global_max_duration_ms),
-        cooldown_seconds=bot.settings.default_cooldown_seconds,
+    if target.bot:
+        await _respond_error(interaction, "A bot account cannot own an OpenShock assignment.")
+        return
+    try:
+        normalized_shocker_id = str(UUID(shocker_id.strip()))
+    except ValueError:
+        await _respond_error(interaction, "That is not a valid OpenShock shocker UUID.")
+        return
+
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    try:
+        accessible = await bot.accessible_shockers(refresh=True)
+    except OpenShockError:
+        LOGGER.exception("Could not list central-account shockers")
+        await _respond_error(
+            interaction,
+            "OpenShockBot could not verify the central account's shockers.",
+        )
+        return
+    selected = next(
+        (shocker for shocker in accessible if shocker.shocker_id == normalized_shocker_id),
+        None,
     )
+    if selected is None:
+        await _respond_error(
+            interaction,
+            "The central OpenShock account cannot access that shocker. "
+            "Have its owner share it with the bot account first.",
+        )
+        return
+
+    try:
+        await bot.database.stage_link(
+            target.id,
+            selected.shocker_id,
+            selected.name,
+            interaction.user.id,
+        )
+    except LinkConflictError as exc:
+        await _respond_error(interaction, str(exc))
+        return
+
+    dm_delivered = True
+    try:
+        await target.send(
+            f"An OpenShockBot administrator wants to assign the shared shocker "
+            f"**{selected.name}** to you in Discord. No API token is needed.\n\n"
+            "Run `/openshock accept-link` to accept, or `/openshock decline-link` to decline. "
+            "New links begin paused, allow-list-only, and with shock reactions disabled."
+        )
+    except discord.HTTPException:
+        dm_delivered = False
+
+    delivery = (
+        "I also sent them a DM." if dm_delivered else "Their DMs are closed; tell them directly."
+    )
+    await interaction.edit_original_response(
+        content=(
+            f"Link request created for {target.mention} using **{selected.name}**. "
+            f"They must accept it before controls work. {delivery}"
+        )
+    )
+
+
+@link_command.autocomplete("shocker_id")
+async def link_shocker_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> list[app_commands.Choice[str]]:
+    bot = _bot(interaction)
+    if not await bot.is_owner(interaction.user):
+        return []
+    try:
+        accessible = await bot.accessible_shockers()
+    except OpenShockError:
+        LOGGER.warning("Could not autocomplete central-account shockers")
+        return []
+    search = current.casefold()
+    matches = [
+        shocker
+        for shocker in accessible
+        if search in shocker.name.casefold() or search in shocker.shocker_id.casefold()
+    ]
+    return [
+        app_commands.Choice(
+            name=f"{shocker.name} · {shocker.source} · …{shocker.shocker_id[-8:]}"[:100],
+            value=shocker.shocker_id,
+        )
+        for shocker in matches[:25]
+    ]
+
+
+@openshock_group.command(
+    name="accept-link",
+    description="Accept your pending central-account shocker assignment.",
+)
+async def accept_link_command(interaction: discord.Interaction) -> None:
+    bot = _bot(interaction)
+    pending = await bot.database.get_pending_link(interaction.user.id)
+    if pending is None:
+        await _respond_error(interaction, "You do not have a pending link request.")
+        return
+
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    try:
+        accessible = await bot.accessible_shockers(refresh=True)
+    except OpenShockError:
+        LOGGER.exception("Could not revalidate a pending central-account shocker")
+        await _respond_error(interaction, "OpenShockBot could not revalidate that shared shocker.")
+        return
+    if not any(shocker.shocker_id == pending.shocker_id for shocker in accessible):
+        await _respond_error(
+            interaction,
+            "The central OpenShock account no longer has access to that shocker. "
+            "Ask an administrator to cancel and recreate the request after it is shared.",
+        )
+        return
+
+    try:
+        accepted = await bot.database.accept_pending_link(
+            interaction.user.id,
+            display_name=getattr(interaction.user, "display_name", interaction.user.name),
+            max_intensity=min(25, bot.settings.global_max_intensity),
+            max_duration_ms=min(3000, bot.settings.global_max_duration_ms),
+            cooldown_seconds=bot.settings.default_cooldown_seconds,
+        )
+    except LinkConflictError as exc:
+        await _respond_error(interaction, str(exc))
+        return
+    await interaction.edit_original_response(
+        content=(
+            f"You are linked to **{accepted.shocker_name}**. For safety, controls are paused, "
+            "access is allow-list-only, and shock reactions are disabled. Review "
+            "`/openshock status`, configure access, then resume when ready."
+        )
+    )
+
+
+@openshock_group.command(
+    name="decline-link", description="Decline your pending shocker assignment."
+)
+async def decline_link_command(interaction: discord.Interaction) -> None:
+    bot = _bot(interaction)
+    if not await bot.database.decline_pending_link(interaction.user.id):
+        await _respond_error(interaction, "You do not have a pending link request.")
+        return
+    await interaction.response.send_message("The link request was declined.", ephemeral=True)
+
+
+@openshock_group.command(
+    name="unlink",
+    description="Remove your assignment, or an assignment you administer.",
+)
+async def unlink_command(
+    interaction: discord.Interaction,
+    target: discord.Member | None = None,
+) -> None:
+    bot = _bot(interaction)
+    selected = target or interaction.user
+    if selected.id != interaction.user.id and not await bot.is_owner(interaction.user):
+        await _respond_error(interaction, "Only a configured bot owner can unlink another user.")
+        return
+    removed_target, removed_pending = await bot.database.remove_assignment(selected.id)
+    if not removed_target and not removed_pending:
+        await _respond_error(interaction, "That Discord user has no assignment or pending request.")
+        return
+    removed = []
+    if removed_target:
+        removed.append("active assignment")
+    if removed_pending:
+        removed.append("pending request")
     await interaction.response.send_message(
-        f"{target.mention} is linked. The shocker UUID was not echoed.",
+        f"Removed {', '.join(removed)} for {selected.mention}.",
         ephemeral=True,
     )
+
+
+@openshock_group.command(
+    name="links",
+    description="List central-account shockers and Discord assignments.",
+)
+async def links_command(interaction: discord.Interaction) -> None:
+    bot = _bot(interaction)
+    if not await bot.is_owner(interaction.user):
+        await _respond_error(interaction, "Only a configured bot owner can list assignments.")
+        return
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    try:
+        accessible = await bot.accessible_shockers(refresh=True)
+    except OpenShockError:
+        LOGGER.exception("Could not list central-account shockers")
+        await _respond_error(interaction, "OpenShockBot could not list central-account shockers.")
+        return
+    assignments = await bot.database.list_assignments()
+    pending_links = await bot.database.list_pending_links()
+    assigned_by_shocker = {assignment.shocker_id: assignment for assignment in assignments}
+    pending_by_shocker = {pending.shocker_id: pending for pending in pending_links}
+    accessible_ids = {shocker.shocker_id for shocker in accessible}
+
+    lines = ["**Central OpenShock account**"]
+    for shocker in accessible:
+        if shocker.shocker_id in assigned_by_shocker:
+            assignment = assigned_by_shocker[shocker.shocker_id]
+            state = f"assigned to <@{assignment.discord_user_id}>"
+        elif shocker.shocker_id in pending_by_shocker:
+            pending = pending_by_shocker[shocker.shocker_id]
+            state = f"pending acceptance by <@{pending.target_discord_user_id}>"
+        else:
+            state = "unassigned"
+        paused = " · OpenShock-paused" if shocker.paused else ""
+        lines.append(
+            f"**{shocker.name}** · {shocker.source} · `…{shocker.shocker_id[-8:]}` · "
+            f"{state}{paused}"
+        )
+
+    for assignment in assignments:
+        if assignment.shocker_id not in accessible_ids:
+            lines.append(
+                f"⚠ inaccessible mapped shocker · assigned to <@{assignment.discord_user_id}>"
+            )
+    for pending in pending_links:
+        if pending.shocker_id not in accessible_ids:
+            lines.append(
+                f"⚠ **{pending.shocker_name}** · inaccessible pending request for "
+                f"<@{pending.target_discord_user_id}>"
+            )
+    if len(lines) == 1:
+        lines.append("No owned or shared shockers are visible to the central account.")
+    content = "\n".join(lines)
+    if len(content) > 1900:
+        content = f"{content[:1850]}\n…output truncated"
+    await interaction.edit_original_response(content=content)
 
 
 def run_bot(settings: Settings) -> None:
